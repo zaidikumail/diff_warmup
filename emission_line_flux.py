@@ -146,7 +146,7 @@ def get_emission_line_Flux(
 		_quad_continuum_model, _mseloss, continuum_wave_masked, continuum_rest_sed_masked)
 
 	#interpolate continuum rest sed in the line masked region
-	continuum_rest_sed_fit_interp = np.interp(continuum_wave, continuum_wave_masked, continuum_rest_sed_fit)
+	continuum_rest_sed_fit_interp = jnp.interp(continuum_wave, continuum_wave_masked, continuum_rest_sed_fit)
 
 	#limit to line wavelengths
 	line_mask = (continuum_wave >= line_lo) & (continuum_wave <= line_hi)
