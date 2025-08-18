@@ -18,7 +18,6 @@ import astropy.units as u
 import numpy.ma as ma
 
 
-
 def _quad_continuum_model(theta, wave):
     c0 = theta["c0"]
     c1 = theta["c1"]
@@ -40,7 +39,7 @@ def _mseloss(theta, model, wave, flux_true):
 
 
 
-def _model_optimization_loop(theta, model, loss, wave, flux_true, n_steps=10000, step_size=1e-18):
+def _model_optimization_loop(theta, model, loss, wave, flux_true, n_steps=5000, step_size=1e-18):
     dloss = grad(loss)
 
     #initial continuum_rest_sed
@@ -75,10 +74,22 @@ def _get_masked_sed(continuum_wave, continuum_rest_sed, lo, hi):
 
 
 def _get_line_rest_sed(wave, rest_sed, continuum_rest_sed, line_mask):
+	"""
+	Parameters:
+		wave: wavelength in Angstroms
+		rest_sed: rest-frame SED in units of Lsun/Hz
+		continuum_rest_sed: rest-frame continuum fitted sed in units of Lsun/Hz
+		line_mask: boolean mask array to select wave spanning line
+
+	Returns:
+		line_wave: wavelength in Angstroms spanning line
+		line_rest_sed: rest_sed - continuum_rest_sed; [Lsun/Hz]
+		line_rest_sed_Lnu: line_rest_sed converted to erg/s/Hz units (Lnu)
+	"""
 	
 	line_wave = wave[line_mask]
 	line_rest_sed = rest_sed[line_mask] - continuum_rest_sed[line_mask]
-	line_rest_sed_Lnu = line_rest_sed * L_sun.cgs.value #convert from Lsol/Hz --> erg/s/Hz (Lnu)
+	line_rest_sed_Lnu = line_rest_sed * L_sun.cgs.value #convert from Lsun/Hz --> erg/s/Hz (Lnu)
 
 	return line_wave, line_rest_sed, line_rest_sed_Lnu
 
@@ -87,7 +98,7 @@ def _get_Fnu_from_Lnu(rest_sed_Lnu):
 	#Lnu (rest-frame) to Fnu (absolute) in units of [erg/s/Hz/cm^2]
 	D_pc = 10 * u.pc
 	D_cm = D_pc.to(u.cm).value
-	rest_sed_Fnu = rest_sed_Lnu / (4 * np.pi * (D_cm)**2) #[erg/s/Hz/cm^2]
+	rest_sed_Fnu = rest_sed_Lnu / (4 * np.pi * (D_cm**2)) #[erg/s/Hz/cm^2]
 
 	return rest_sed_Fnu
 
@@ -96,17 +107,37 @@ def _get_integrated_Flux(wave_AA, rest_sed_Fnu):
 	"""
 	Parameters:
 		wave_AA - wavelength array in units of Angstrom
+		rest_sed_Fnu - Fnu [erg/s/Hz/cm^2]
 
 	Returns: 
 		integrated_rest_F - integrated Fnu in units of [erg/s/cm^2]
 
 	"""
 	freq_Hz = const.c.value / (wave_AA*1e-10)
+	freq_Hz = jnp.flip(freq_Hz)
 
-	#integrated Fnu
+	#integrated F
 	integrated_rest_F = np.trapezoid(rest_sed_Fnu, freq_Hz)	#[erg/s/cm^2]
 
 	return integrated_rest_F
+
+def _get_integrated_L(wave_AA, rest_sed_Lnu):
+	"""
+	Parameters:
+		wave_AA - wavelength array in units of Angstrom
+		rest_sed_Lnu - Fnu [erg/s/Hz]
+
+	Returns: 
+		integrated_rest_L - integrated Fnu in units of [erg/s]
+
+	"""
+	freq_Hz = const.c.value / (wave_AA*1e-10)
+	freq_Hz = jnp.flip(freq_Hz)
+
+	#integrated L
+	integrated_rest_L = np.trapezoid(rest_sed_Lnu, freq_Hz)	#[erg/s]
+
+	return integrated_rest_L
 
 
 def _get_clipped_sed(wave, sed, wave_lo, wave_hi):
@@ -152,8 +183,9 @@ def get_emission_line_Flux(
 	line_mask = (continuum_wave >= line_lo) & (continuum_wave <= line_hi)
 	line_wave, line_rest_sed, line_rest_sed_Lnu = _get_line_rest_sed(continuum_wave, continuum_rest_sed, continuum_rest_sed_fit_interp, line_mask)
 
-	line_rest_sed_Fnu = _get_Fnu_from_Lnu(line_rest_sed_Lnu)
+	integrated_line_rest_L = _get_integrated_L(line_wave, line_rest_sed_Lnu)
 
+	line_rest_sed_Fnu = _get_Fnu_from_Lnu(line_rest_sed_Lnu)
 	integrated_line_rest_F = _get_integrated_Flux(line_wave, line_rest_sed_Fnu)
 
 
@@ -161,24 +193,10 @@ def get_emission_line_Flux(
 				"continuum_rest_sed_initial" : continuum_rest_sed_initial,
 				"continuum_rest_sed_fit" : continuum_rest_sed_fit,
 				"line_wave" : line_wave,
+				"line_rest_sed_Lnu": line_rest_sed_Lnu,
+				"integrated_line_rest_L": integrated_line_rest_L,
 				"line_rest_sed_Fnu" : line_rest_sed_Fnu,
 				"integrated_line_rest_F" : integrated_line_rest_F
 				}
 
 	return losses, theta, sed_dict
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
