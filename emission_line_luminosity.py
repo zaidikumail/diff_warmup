@@ -85,7 +85,7 @@ def _get_line_sed(wave, sed, continuum_sed, line_mask):
 	"""
 	Parameters:
 		wave: wavelength in Angstroms
-		sed: SED in units of Lsun/Hz/Msun
+		sed: SED in units log10 of [Lsun/Hz/Msun]
 		continuum_sed: rest-frame continuum fitted sed in units of Lsun/Hz/Msun
 		line_mask: boolean mask array to select wave spanning line
 
@@ -95,7 +95,14 @@ def _get_line_sed(wave, sed, continuum_sed, line_mask):
 	"""
 	
 	line_wave = wave[line_mask]
-	line_sed = sed[line_mask] - continuum_sed[line_mask]
+	line_sed = 10**sed[line_mask] - 10**continuum_sed[line_mask]
+
+	#Protects against ANY sed wiggle within line wavelengths being below the continuum sed fit --> Indication of no line.
+	#Previously the code was written in a way that ALL sed wiggles had to be below the continuum fit, for the line_sed to be set to zero array.
+	if (line_sed<=0).sum() >= 1:
+		all_true = jnp.ones(line_sed.shape, dtype=bool)
+		line_sed = jnp.where(all_true, np.zeros(line_sed.shape), np.zeros(line_sed.shape))
+	
 	#line_rest_sed_Lnu = line_rest_sed * L_sun.cgs.value #convert from Lsun/Hz --> erg/s/Hz (Lnu)
 
 	return line_wave, line_sed
@@ -114,41 +121,11 @@ def _get_integrated_luminosity(wave, sed):
 	freq = const.c.value / (wave*1e-10)
 	freq = jnp.flip(freq)
 
+	
 	integrated_luminosity = np.trapezoid(sed, freq)	#[Lsun/Msun]
 
+
 	return integrated_luminosity
-
-
-
-
-
-# def _get_Fnu_from_Lnu(rest_sed_Lnu):
-# 	#Lnu (rest-frame) to Fnu (absolute) in units of [erg/s/Hz/cm^2]
-# 	D_pc = 10 * u.pc
-# 	D_cm = D_pc.to(u.cm).value
-# 	rest_sed_Fnu = rest_sed_Lnu / (4 * np.pi * (D_cm**2)) #[erg/s/Hz/cm^2]
-
-# 	return rest_sed_Fnu
-
-
-# def _get_integrated_Flux(wave_AA, rest_sed_Fnu):
-# 	"""
-# 	Parameters:
-# 		wave_AA - wavelength array in units of Angstrom
-# 		rest_sed_Fnu - Fnu [erg/s/Hz/cm^2]
-
-# 	Returns: 
-# 		integrated_rest_F - integrated Fnu in units of [erg/s/cm^2]
-
-# 	"""
-# 	freq_Hz = const.c.value / (wave_AA*1e-10)
-# 	freq_Hz = jnp.flip(freq_Hz)
-
-# 	#integrated F
-# 	integrated_rest_F = np.trapezoid(rest_sed_Fnu, freq_Hz)	#[erg/s/cm^2]
-
-# 	return integrated_rest_F
-
 
 
 def get_emission_line_luminosity(
@@ -158,8 +135,8 @@ def get_emission_line_luminosity(
 	continuum_fit_lo_hi, 
 	continuum_fit_hi_lo, 
 	continuum_fit_hi_hi,
-	line_lo,
-	line_hi
+	line_center,
+	line_delta
 	):
 
 	"""
@@ -174,8 +151,8 @@ def get_emission_line_luminosity(
 
 	#initialize qudratic coeeficients close to a flat line at the mean of continuum_rest_sed_masked
 	c0_initial =  jnp.mean(sed_masked)
-	c1_initial =  1e-18 	#very small
-	c2_initial = -3e-18 	#very small
+	c1_initial =  0.0	#very small
+	c2_initial =  0.0 	#very small
 
 	losses, theta, continuum_sed_initial_masked, continuum_sed_fit_masked = _model_optimization_loop(dict(c0=c0_initial, c1=c1_initial, c2=c2_initial),
 		_quad_continuum_model, _mseloss, wave_masked, sed_masked)
@@ -184,12 +161,15 @@ def get_emission_line_luminosity(
 	continuum_sed_fit_clipped = jnp.interp(wave_clipped, wave_masked, continuum_sed_fit_masked)
 
 	#limit to line wavelengths
+	line_lo   = line_center - line_delta
+	line_hi   = line_center + line_delta
 	line_mask = (wave_clipped >= line_lo) & (wave_clipped <= line_hi)
 	line_wave, line_sed = _get_line_sed(wave_clipped, sed_clipped, continuum_sed_fit_clipped, line_mask)
 
 	line_integrated_luminosity = _get_integrated_luminosity(line_wave, line_sed)
 
 	sed_dict = {"wave_masked" : wave_masked, 
+				"sed_masked" : sed_masked,
 				"continuum_sed_initial_masked" : continuum_sed_initial_masked,
 				"continuum_sed_fit_masked" : continuum_sed_fit_masked,
 				"line_wave" : line_wave,
@@ -198,58 +178,3 @@ def get_emission_line_luminosity(
 				}
 
 	return losses, theta, sed_dict
-
-
-
-# def get_emission_line_Flux(
-# 	wave, 
-# 	rest_sed, 
-# 	continuum_fit_lo_lo, 
-# 	continuum_fit_lo_hi, 
-# 	continuum_fit_hi_lo, 
-# 	continuum_fit_hi_hi, 
-# 	line_lo, 
-# 	line_center, 
-# 	line_hi
-# 	):
-
-	
-# 	continuum_wave, continuum_rest_sed = _get_clipped_sed(wave, rest_sed, continuum_fit_lo_lo, continuum_fit_hi_hi)
-
-
-# 	mask, continuum_wave_masked, continuum_rest_sed_masked = _get_masked_sed(continuum_wave, continuum_rest_sed, continuum_fit_lo_hi, continuum_fit_hi_lo)
-
-
-# 	#initialize qudratic coeeficients close to a flat line at the mean of continuum_rest_sed_masked
-# 	c0_initial =  jnp.mean(continuum_rest_sed_masked)
-# 	c1_initial =  1e-18 	#very small
-# 	c2_initial = -3e-18 	#very small
-
-
-# 	losses, theta, continuum_rest_sed_initial, continuum_rest_sed_fit = _model_optimization_loop(dict(c0=c0_initial, c1=c1_initial, c2=c2_initial),
-# 		_quad_continuum_model, _mseloss, continuum_wave_masked, continuum_rest_sed_masked)
-
-# 	#interpolate continuum rest sed in the line masked region
-# 	continuum_rest_sed_fit_interp = jnp.interp(continuum_wave, continuum_wave_masked, continuum_rest_sed_fit)
-
-# 	#limit to line wavelengths
-# 	line_mask = (continuum_wave >= line_lo) & (continuum_wave <= line_hi)
-# 	line_wave, line_rest_sed, line_rest_sed_Lnu = _get_line_rest_sed(continuum_wave, continuum_rest_sed, continuum_rest_sed_fit_interp, line_mask)
-
-# 	integrated_line_rest_L = _get_integrated_L(line_wave, line_rest_sed_Lnu)
-
-# 	line_rest_sed_Fnu = _get_Fnu_from_Lnu(line_rest_sed_Lnu)
-# 	integrated_line_rest_F = _get_integrated_Flux(line_wave, line_rest_sed_Fnu)
-
-
-# 	sed_dict = {"continuum_wave_masked" : continuum_wave_masked, 
-# 				"continuum_rest_sed_initial" : continuum_rest_sed_initial,
-# 				"continuum_rest_sed_fit" : continuum_rest_sed_fit,
-# 				"line_wave" : line_wave,
-# 				"line_rest_sed_Lnu": line_rest_sed_Lnu,
-# 				"integrated_line_rest_L": integrated_line_rest_L,
-# 				"line_rest_sed_Fnu" : line_rest_sed_Fnu,
-# 				"integrated_line_rest_F" : integrated_line_rest_F
-# 				}
-
-# 	return losses, theta, sed_dict
