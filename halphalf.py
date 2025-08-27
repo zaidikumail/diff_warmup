@@ -26,15 +26,16 @@ import astropy.units as u
 import numpy.ma as ma
 L_SUN_CGS = jnp.array(L_sun.cgs.value)
 
-def get_L_halpha(gal_sfr_table, 
-                 gal_lgmet, 
-                 gal_lgmet_scatter, 
-                 gal_t_table, 
-                 ssp_lgmet, 
-                 ssp_lg_age_gyr,
-                 ssp_halpha_line_luminosity,
-                 t_obs
-                 ):
+def get_L_halpha(
+    gal_sfr_table, 
+    gal_lgmet, 
+    gal_lgmet_scatter, 
+    gal_t_table, 
+    ssp_lgmet, 
+    ssp_lg_age_gyr,
+    ssp_halpha_line_luminosity,
+    t_obs
+    ):
 
     weights, lgmet_weights, age_weights = calc_ssp_weights_sfh_table_lognormal_mdf(gal_t_table,
                                                                                    gal_sfr_table,
@@ -66,31 +67,37 @@ get_L_halpha_vmap = jjit(vmap(
     out_axes=(0, 0)
     ))
 
-def get_halpha_luminosity_func(L_halpha_cgs, sig=0.001, dlgL_bin=0.2, lgL_min=40., lgL_max=45.):
+def get_halpha_luminosity_func(
+    L_halpha_cgs, 
+    weights,
+    sig=0.001, 
+    dlgL_bin=0.2, 
+    lgL_min=40., 
+    lgL_max=45.
+    ):
+
     lg_L_halpha_cgs = jnp.log10(L_halpha_cgs)
     
     sig = jnp.zeros_like(lg_L_halpha_cgs) + sig
-    y = jnp.ones_like(lg_L_halpha_cgs)
     
     lgL_bin_edges = jnp.arange(lgL_min, lgL_max, dlgL_bin)
     lgL_bin_lo = lgL_bin_edges[:-1].reshape(lgL_bin_edges[:-1].size,1)
     lgL_bin_hi = lgL_bin_edges[1:].reshape(lgL_bin_edges[1:].size,1)
     
     tw_hist = diffndhist._tw_ndhist_vmap(lg_L_halpha_cgs, sig, lgL_bin_lo, lgL_bin_hi)
-    tw_hist_weighted = diffndhist.tw_ndhist_weighted(lg_L_halpha_cgs, sig, y, lgL_bin_lo, lgL_bin_hi)
+    tw_hist_weighted = diffndhist.tw_ndhist_weighted(lg_L_halpha_cgs, sig, weights, lgL_bin_lo, lgL_bin_hi)
 
     return lgL_bin_edges, tw_hist_weighted
 
-def pop_model(theta, 
-              ssp_lgmet, 
-              ssp_lg_age_gyr,
-              ssp_halpha_line_luminosity,
-              t_obs,
-              lg_sfr_var=0.1, 
-              N=10000, 
-              gal_lgmet=-1.0, 
-              gal_lgmet_scatter=0,
-             ):
+def pop_model(
+    theta, 
+    ssp_lgmet, 
+    ssp_lg_age_gyr,
+    ssp_halpha_line_luminosity,
+    t_obs,
+    lg_sfr_var=0.1, N=10000, gal_lgmet=-1.0, gal_lgmet_scatter=0,
+    ):
+
     lg_sfr_mean = theta["lg_sfr_mean"]
     key = random.PRNGKey(1000)
     lg_sfr_draws = lg_sfr_mean + jnp.sqrt(lg_sfr_var) * random.normal(key, shape=(N,))
@@ -108,7 +115,69 @@ def pop_model(theta,
                                                     ssp_halpha_line_luminosity, 
                                                     t_obs
                                                    )
-    lgL_bin_edges , tw_hist_weighted = get_halpha_luminosity_func(L_halpha_cgs)
+    weights = jnp.ones_like(L_halpha_cgs)
+    lgL_bin_edges , tw_hist_weighted = get_halpha_luminosity_func(L_halpha_cgs, weights)
 
     return lgL_bin_edges, tw_hist_weighted, L_halpha_cgs
+
+def bimodal_SF_Q_draws(
+    k0, k1, k2, 
+    lgsfr_SF_mean,
+    frac_SF,
+    lgsfr_Q_mean,
+    dex_var=0.1,
+    N=10000
+    ):
+    
+    frac_Q = 1 - frac_SF
+    lgsfr_SF_draws = lgsfr_SF_mean + jnp.sqrt(dex_var) * random.normal(k0, shape=(N,))
+    lgsfr_Q_draws  = lgsfr_Q_mean + jnp.sqrt(dex_var) * random.normal(k1, shape=(N,))
+
+
+
+    SF_sel = random.bernoulli(k2, p=frac_SF, shape=(N,))
+    lgsfr_draws = jnp.where(SF_sel, lgsfr_SF_draws, lgsfr_Q_draws)
+
+    return lgsfr_draws, SF_sel
+
+def pop_bimodal(
+    theta,
+    ssp_lgmet, 
+    ssp_lg_age_gyr,
+    ssp_halpha_line_luminosity,
+    t_obs,
+    gal_lgmet=-1.0, gal_lgmet_scatter=0, N=10000
+    ):
+
+
+    lg_sfr_draws, SF_sel = bimodal_SF_Q_draws(
+        random.PRNGKey(0), random.PRNGKey(1), random.PRNGKey(2), 
+        lgsfr_SF_mean=theta["lgsfr_SF_mean"],
+        frac_SF=theta["frac_SF"],
+        lgsfr_Q_mean=theta["lgsfr_Q_mean"],
+        N=N
+        )
+
+    gal_t_table = jnp.linspace(0.05, 13.8, 100) # age of the universe in Gyr
+    gal_sfr_tables = jnp.ones((gal_t_table.size, N)) * (10**lg_sfr_draws)# SFR in Msun/yr
+    gal_sfr_tables = gal_sfr_tables.T
+
+    L_halpha_cgs, L_halpha_unit = get_L_halpha_vmap(
+        gal_sfr_tables, 
+        gal_lgmet,
+        gal_lgmet_scatter, 
+        gal_t_table,
+        ssp_lgmet, 
+        ssp_lg_age_gyr,
+        ssp_halpha_line_luminosity, 
+        t_obs
+        )
+
+    SF_weights = SF_sel.astype(jnp.float64).reshape(L_halpha_cgs.shape)
+    Q_weights = jnp.logical_not(SF_sel).astype(jnp.float64).reshape(L_halpha_cgs.shape)
+    
+    lgL_bin_edges, tw_hist_weighted_SF = get_halpha_luminosity_func(L_halpha_cgs, SF_weights)
+    lgL_bin_edges, tw_hist_weighted_Q = get_halpha_luminosity_func(L_halpha_cgs, Q_weights)
+
+    return lgL_bin_edges, L_halpha_cgs, tw_hist_weighted_SF, tw_hist_weighted_Q, SF_weights, Q_weights
 
